@@ -21,9 +21,9 @@ def parse_sensor_data(text):
     data = {}
 
     patterns = {
-        "temperature": r"BME280 Temperature:\s*([0-9.]+)\s*C",
-        "pressure": r"BME280 Pressure:\s*([0-9.]+)\s*Pa",
-        "humidity": r"BME280 Humidity:\s*([0-9.]+)\s*%",
+        "temperature": r"Temp:\s*([0-9.]+)\s*C",
+        "pressure": r"Pressure:\s*([0-9.]+)\s*Pa",
+        "humidity": r"Humidity:\s*([0-9.]+)\s*%",
         "lux": r"Lux:\s*([0-9.]+)"
     }
 

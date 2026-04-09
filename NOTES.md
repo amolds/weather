@@ -11,3 +11,8 @@ Run docker binding port 80 to container's 8080: docker run -p 80:8080 weather-ht
 
 Have docker inspect a volume to locate data files: docker volume inspect sql2025data
 
+##
+
+python3 -m venv venv
+source venv/bin/activate
+

@@ -141,9 +141,46 @@ class Handler(BaseHTTPRequestHandler):
 
             last24_labels_json = json.dumps(last24_labels)
             last24_temps_json = json.dumps(last24_temps_f)
-            daily_labels_json = json.dumps(daily_labels)
-            daily_lows_json = json.dumps(daily_lows_f)
-            daily_highs_json = json.dumps(daily_highs_f)
+
+            # Group daily high/low by ISO week (most recent week first)
+            weeks = {}
+            for lbl, low, high in zip(daily_labels, daily_lows_f, daily_highs_f):
+                try:
+                    day = datetime.strptime(lbl, "%Y-%m-%d").date()
+                except Exception:
+                    day = None
+
+                if day is not None:
+                    iso = day.isocalendar()
+                    key = (iso[0], iso[1])  # (year, week)
+                    week_label = f"{day.strftime('%a %m-%d')}"
+                else:
+                    key = (0, 0)
+                    week_label = lbl
+
+                if key not in weeks:
+                    weeks[key] = {"labels": [], "lows": [], "highs": [], "year": key[0], "week": key[1]}
+
+                weeks[key]["labels"].append(week_label)
+                weeks[key]["lows"].append(low)
+                weeks[key]["highs"].append(high)
+
+            # Sort weeks most recent first
+            sorted_weeks = sorted(weeks.items(), key=lambda x: x[0], reverse=True)
+
+            weekly_data = []
+            weekly_canvases_html = ""
+            for (year, wnum), data in sorted_weeks:
+                canvas_id = f"weeklyChart_{year}_{wnum}"
+                weekly_canvases_html += f'<div class="card"><h3>Week {wnum} — {year}</h3><canvas id="{canvas_id}"></canvas></div>'
+                weekly_data.append({
+                    "id": canvas_id,
+                    "labels": data["labels"],
+                    "lows": data["lows"],
+                    "highs": data["highs"]
+                })
+
+            weekly_data_json = json.dumps(weekly_data)
 
             lux = reading["lux"]
             lux_icon, lux_desc = lux_icon_and_label(lux)
@@ -253,11 +290,7 @@ class Handler(BaseHTTPRequestHandler):
                         grid-template-columns: 1fr;
                         gap: 20px;
                     }}
-                    @media (min-width: 900px) {{
-                        .charts {{
-                            grid-template-columns: 1fr 1fr;
-                        }}
-                    }}
+                    /* Keep charts stacked so the Last 24 Hours card matches Latest Reading width */
                     canvas {{
                         width: 100% !important;
                         height: 300px !important;
@@ -304,10 +337,8 @@ class Handler(BaseHTTPRequestHandler):
                             <canvas id="last24Chart"></canvas>
                         </div>
 
-                        <div class="card">
-                            <h2>Daily High / Low (Temperature °F)</h2>
-                            <canvas id="dailyChart"></canvas>
-                        </div>
+                        <!-- Weekly stacked daily high/low cards (most recent week first) -->
+                        {weekly_canvases_html}
                     </div>
                 </div>
 
@@ -325,12 +356,9 @@ class Handler(BaseHTTPRequestHandler):
 
                     const last24Labels = {last24_labels_json};
                     const last24Temps = {last24_temps_json};
-                    const dailyLabels = {daily_labels_json};
-                    const dailyLows = {daily_lows_json};
-                    const dailyHighs = {daily_highs_json};
+                    const weeklyData = {weekly_data_json};
 
                     const last24Ctx = document.getElementById('last24Chart').getContext('2d');
-                    const dailyCtx = document.getElementById('dailyChart').getContext('2d');
 
                     new Chart(last24Ctx, {{
                         type: 'line',
@@ -361,37 +389,35 @@ class Handler(BaseHTTPRequestHandler):
                         }}
                     }});
 
-                    new Chart(dailyCtx, {{
-                        type: 'bar',
-                        data: {{
-                            labels: dailyLabels,
-                            datasets: [
-                                {{
-                                    label: 'Low (°F)',
-                                    data: dailyLows,
-                                    backgroundColor: 'rgba(74,144,226,0.7)'
-                                }},
-                                {{
-                                    label: 'High (°F)',
-                                    data: dailyHighs,
-                                    backgroundColor: 'rgba(208,2,27,0.7)'
-                                }}
-                            ]
-                        }},
-                        options: {{
-                            responsive: true,
-                            plugins: {{
-                                legend: {{ display: true }}
+                    // Render a bar chart for each week (stacked vertically, most recent first)
+                    weeklyData.forEach(w => {{
+                        const ctx = document.getElementById(w.id).getContext('2d');
+                        new Chart(ctx, {{
+                            type: 'bar',
+                            data: {{
+                                labels: w.labels,
+                                datasets: [
+                                    {{
+                                        label: 'Low (°F)',
+                                        data: w.lows,
+                                        backgroundColor: 'rgba(74,144,226,0.7)'
+                                    }},
+                                    {{
+                                        label: 'High (°F)',
+                                        data: w.highs,
+                                        backgroundColor: 'rgba(208,2,27,0.7)'
+                                    }}
+                                ]
                             }},
-                            scales: {{
-                                x: {{
-                                    title: {{ display: true, text: 'Day' }}
-                                }},
-                                y: {{
-                                    title: {{ display: true, text: 'Temperature (°F)' }}
+                            options: {{
+                                responsive: true,
+                                plugins: {{ legend: {{ display: true }} }},
+                                scales: {{
+                                    x: {{ title: {{ display: true, text: 'Day' }} }},
+                                    y: {{ title: {{ display: true, text: 'Temperature (°F)' }} }}
                                 }}
                             }}
-                        }}
+                        }});
                     }});
                 </script>
             </body>
@@ -399,15 +425,12 @@ class Handler(BaseHTTPRequestHandler):
             """
 
         self.send_response(200)
-        self.send_header("Content-type", "text/html")
+        self.send_header('Content-type', 'text/html')
         self.end_headers()
-        self.wfile.write(html.encode("utf-8"))
+        self.wfile.write(html.encode('utf-8'))
 
-def run():
-    server = HTTPServer(("0.0.0.0", 8080), Handler)
-    print("Server running on port 8080")
-    server.serve_forever()
-
-if __name__ == "__main__":
-    run()
-
+if __name__ == '__main__':
+    server_address = ('0.0.0.0', 8080)
+    httpd = HTTPServer(server_address, Handler)
+    print('Serving on port 8080...')
+    httpd.serve_forever()
