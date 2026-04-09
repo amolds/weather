@@ -1,0 +1,8 @@
+CREATE FUNCTION dbo.C2F (@Celsius FLOAT)
+RETURNS FLOAT
+AS
+BEGIN
+    RETURN (@Celsius * 9.0 / 5.0) + 32.0;
+END;
+GO
+
