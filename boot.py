@@ -2,447 +2,203 @@ import network
 import socket
 import time
 import gc
-import machine
-import sys
-import io
+import json
+from machine import I2C, Pin
 from bme280 import BME280
 from bh1750 import BH1750
 
 # --- Configuration ---
 ssid = "<ssid>"
-password = "<pwd>"
+password = "<password>"
+DEBUG = True
 
-SECRET_REPL_TOKEN = "<pwd>"
-# If a button is held at boot the device will start WebREPL and not run the HTTP server
-REPL_BUTTON_PIN = 0
-REPL_BUTTON_ACTIVE_LOW = True
-TCP_REPL_ENABLED = True
-TCP_REPL_PORT = 2323
-TCP_REPL_TIMEOUT = 0.1
-ENABLE_WDT = True
-WDT_TIMEOUT_MS = 15000
+# WiFi reconnection settings
+WIFI_RECONNECT_DELAY = 30  # seconds between reconnection attempts
+WIFI_MAX_RECONNECT_ATTEMPTS = 3  # Recreate WiFi object after this many failures
+last_wifi_check = 0
+wifi_reconnect_attempts = 0
 
+# Memory management
+GC_EVERY_N_REQUESTS = 10  # Collect garbage every 10 requests
+request_count = 0
+
+# --- Connect to WiFi ---
 wifi = network.WLAN(network.STA_IF)
+wifi.active(True)
+wifi.connect(ssid, password)
 
-# Sensor/cache config
-SENSOR_SAMPLE_INTERVAL = 5
-SENSOR_REINIT_INTERVAL = 30
-SENSOR_CACHE_TTL = 60
+start = time.time()
+while not wifi.isconnected():
+    if time.time() - start > 15:
+        print("WiFi connection failed")
+        break
+    time.sleep(0.5)
 
-# Error thresholds
-ERROR_REBOOT_THRESHOLD = 8
+print("Connected:", wifi.ifconfig())
 
+# --- Start Web Server ---
+addr = socket.getaddrinfo('0.0.0.0', 80)[0][-1]
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(addr)
+s.listen(1)
+s.settimeout(1)  # 1 second timeout on accept()
+print("Listening on", addr)
 
-def connect_wifi(ssid, password, timeout=15):
-    wifi.active(True)
-    if wifi.isconnected():
-        return True
-    try:
-        wifi.connect(ssid, password)
-    except Exception as e:
-        print("WiFi connect error:", e)
-
-    start = time.time()
-    while not wifi.isconnected():
-        if time.time() - start > timeout:
-            print("WiFi connect timed out")
-            return False
-        time.sleep(0.5)
-    print("Connected:", wifi.ifconfig())
-    return True
-
-
-if not connect_wifi(ssid, password):
-    print("Failed to connect to WiFi on boot, resetting...")
-    time.sleep(2)
-    machine.reset()
-
-# --- Sensors ---
-i2c = machine.I2C(scl=machine.Pin(5), sda=machine.Pin(4))
-bme = BME280(i2c=i2c)
-bh = BH1750(i2c)
-
-# Sensor cache and init tracking
-sensor_cache = {'t': None, 'p': None, 'h': None, 'l': None, 'timestamp': 0}
-last_sensor_init = time.time()
-
-# --- REPL / WebREPL ---
-# Change this token to something secret before exposing on a network!
-
-def parse_path_from_req(req_bytes):
-    try:
-        first_line = req_bytes.split(b"\r\n", 1)[0]
-        parts = first_line.split(b" ")
-        if len(parts) >= 2:
-            return parts[1].decode('utf-8')
-    except Exception:
-        pass
-    return "/"
-
-def start_webrepl():
-    try:
-        import webrepl
-        try:
-            webrepl.start()
-            print("WebREPL started")
-            return True
-        except Exception as e:
-            print("webrepl.start() failed:", e)
-    except Exception as e:
-        print("webrepl module not available:", e)
-    return False
-
-def stop_webrepl():
-    try:
-        import webrepl
-        if hasattr(webrepl, 'stop'):
-            try:
-                webrepl.stop()
-                print("WebREPL stopped")
-                return True
-            except Exception as e:
-                print("webrepl.stop() failed:", e)
-        else:
-            print("webrepl.stop() not available in this build")
-    except Exception as e:
-        print("webrepl module not available:", e)
-    return False
-
-# --- Web Server ---
-def setup_server(port=80, backlog=2, accept_timeout=0.5):
-    addr = socket.getaddrinfo('0.0.0.0', port)[0][-1]
-    s = socket.socket()
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(addr)
-    s.listen(backlog)
-    s.settimeout(accept_timeout)
-    print("Listening on", addr)
-    return s
-
-
-# If boot button pressed, start WebREPL and don't start HTTP server
-try:
-    btn = machine.Pin(REPL_BUTTON_PIN, machine.Pin.IN, machine.Pin.PULL_UP)
-    pressed = (btn.value() == 0) if REPL_BUTTON_ACTIVE_LOW else (btn.value() == 1)
-except Exception:
-    pressed = False
-
-if pressed:
-    print("REPL boot button pressed; starting WebREPL and entering REPL mode")
-    start_webrepl()
-    # Sit in a minimal loop so REPL (serial or web) stays available
-    while True:
-        feed_wdt()
-        time.sleep(1)
-
-s = setup_server()
-repl_s = None
-if TCP_REPL_ENABLED:
-    def setup_repl_server(port=TCP_REPL_PORT, accept_timeout=TCP_REPL_TIMEOUT):
-        addr = socket.getaddrinfo('0.0.0.0', port)[0][-1]
-        rs = socket.socket()
-        rs.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        rs.bind(addr)
-        rs.listen(1)
-        rs.settimeout(accept_timeout)
-        print("REPL Listening on", addr)
-        return rs
-
-    def handle_repl_client(c):
-        try:
-            try:
-                c.send(b"MicroPython remote REPL. Type 'exit' to quit.\r\n")
-            except:
-                pass
-            while True:
-                try:
-                    c.send(b">>> ")
-                except:
-                    break
-                line = b""
-                try:
-                    while True:
-                        ch = c.recv(1)
-                        if not ch:
-                            raise OSError()
-                        if ch in (b'\r', b'\n'):
-                            # consume possible \n after \r
-                            break
-                        line += ch
-                except Exception:
-                    break
-                try:
-                    sline = line.decode('utf-8').strip()
-                except Exception:
-                    sline = ''
-                if sline == 'exit':
-                    break
-                if not sline:
-                    continue
-                old_stdout = sys.stdout
-                sio = io.StringIO()
-                sys.stdout = sio
-                try:
-                    try:
-                        val = eval(sline, globals(), locals())
-                        if val is not None:
-                            print(repr(val))
-                    except SyntaxError:
-                        exec(sline, globals(), locals())
-                    except Exception as e:
-                        print('Error:', e)
-                finally:
-                    sys.stdout = old_stdout
-                out = sio.getvalue()
-                try:
-                    if out:
-                        c.send(out.encode())
-                    c.send(b"\r\n")
-                except Exception:
-                    break
-                feed_wdt()  # Feed WDT during REPL session
-        finally:
-            try:
-                c.close()
-            except:
-                pass
-
-    try:
-        repl_s = setup_repl_server()
-    except Exception as e:
-        repl_s = None
-        print("Failed to setup TCP REPL socket:", e)
-
-def safe_read_sensors():
-    global sensor_cache, last_sensor_init, bme, bh, i2c
-    now = time.time()
-    
-    # Return cached data if fresh
-    if sensor_cache['timestamp'] > 0 and (now - sensor_cache['timestamp']) < SENSOR_CACHE_TTL:
-        return sensor_cache['t'], sensor_cache['p'], sensor_cache['h'], sensor_cache['l']
-    
-    # Try to read sensors
-    t, p, h, l = None, None, None, None
-    try:
-        t, p, h = bme.read_compensated()
-    except Exception as e:
-        print("BME280 read error:", e)
-    
-    try:
-        l = bh.luminance()
-    except Exception as e:
-        print("BH1750 read error:", e)
-    
-    # If any sensor failed, try reinit if time has passed
-    if (t is None or p is None or h is None or l is None) and (now - last_sensor_init) > SENSOR_REINIT_INTERVAL:
-        print("Reinitializing sensors...")
-        try:
-            i2c = machine.I2C(scl=machine.Pin(5), sda=machine.Pin(4))
-            bme = BME280(i2c=i2c)
-            bh = BH1750(i2c)
-            last_sensor_init = now
-            # Try reading again after reinit
-            try:
-                t, p, h = bme.read_compensated()
-            except:
-                pass
-            try:
-                l = bh.luminance()
-            except:
-                pass
-        except Exception as e:
-            print("Sensor reinit failed:", e)
-    
-    # Update cache if we have data
-    if t is not None and p is not None and h is not None and l is not None:
-        sensor_cache = {'t': t, 'p': p, 'h': h, 'l': l, 'timestamp': now}
-    
-    # Return current or cached
-    if t is not None and p is not None and h is not None and l is not None:
-        return t, p, h, l
-    elif sensor_cache['timestamp'] > 0:
-        print("Using cached sensor data")
-        return sensor_cache['t'], sensor_cache['p'], sensor_cache['h'], sensor_cache['l']
-    else:
-        return None, None, None, None
-
-error_count = 0
-# --- Watchdog (WDT) ---
-# Enable to recover from hangs where exceptions or deadlocks prevent the main loop
-wdt = None
-if ENABLE_WDT:
-    try:
-        wdt = machine.WDT(timeout=WDT_TIMEOUT_MS)
-        print("WDT enabled, timeout:", WDT_TIMEOUT_MS)
-    except Exception as e:
-        print("WDT init failed:", e)
-
-def feed_wdt():
-    try:
-        if wdt:
-            wdt.feed()
-    except Exception:
-        pass
 while True:
-    if not wifi.isconnected():
-        print("WiFi lost; attempting reconnect")
-        if not connect_wifi(ssid, password, timeout=30):
-            print("Reconnect failed; resetting device")
-            time.sleep(2)
-            machine.reset()
-        # recreate server socket after reconnect
-        try:
-            s.close()
-        except:
-            pass
-        s = setup_server()
-        # recreate repl socket after reconnect
-        if TCP_REPL_ENABLED and repl_s:
-            try:
-                repl_s.close()
-            except:
-                pass
-            try:
-                repl_s = setup_repl_server()
-            except Exception as e:
-                repl_s = None
-                print("Failed to recreate TCP REPL socket:", e)
+    # Check WiFi connection with backoff and object recreation
+    now = time.time()
+    if not wifi.isconnected() and (now - last_wifi_check) > WIFI_RECONNECT_DELAY:
+        if DEBUG:
+            print("WiFi lost, attempting reconnection...")
+        
+        # If we've failed too many times, recreate the WiFi object
+        if wifi_reconnect_attempts >= WIFI_MAX_RECONNECT_ATTEMPTS:
+            if DEBUG:
+                print("Too many reconnection failures, recreating WiFi object")
+            wifi = network.WLAN(network.STA_IF)
+            wifi.active(True)
+            wifi_reconnect_attempts = 0
+        
+        wifi.connect(ssid, password)
+        last_wifi_check = now
+        wifi_reconnect_attempts += 1
+        
+        # Wait a bit for connection to establish
+        time.sleep(5)
+        if wifi.isconnected():
+            if DEBUG:
+                print("WiFi reconnected:", wifi.ifconfig())
+            wifi_reconnect_attempts = 0  # Reset counter on success
+        else:
+            if DEBUG:
+                print("WiFi reconnection failed ({0}/{1}), will retry in {2} seconds".format(
+                    wifi_reconnect_attempts, WIFI_MAX_RECONNECT_ATTEMPTS, WIFI_RECONNECT_DELAY))
 
     client = None
-    # Accept incoming TCP REPL connections if enabled
-    if TCP_REPL_ENABLED and repl_s:
-        try:
-            try:
-                rclient, raddr = repl_s.accept()
-                rclient.settimeout(30000)
-                handle_repl_client(rclient)
-            except OSError:
-                pass
-        except Exception as e:
-            print("REPL accept error:", e)
     try:
         try:
-            client, addr = s.accept()
+            client, client_addr = s.accept()
         except OSError:
+            # Timeout waiting for connection - continue loop
+            gc.collect()
             time.sleep_ms(50)
             continue
 
+        # Set timeout on client socket
         client.settimeout(2)
 
-        # Read full request safely
-        req = b""
         try:
-            while True:
-                chunk = client.recv(256)
-                if not chunk:
-                    break
-                req += chunk
-                if b"\r\n\r\n" in req:
-                    break
-        except Exception:
-            pass
-
-        # parse path and handle special REPL endpoints
-        path = parse_path_from_req(req)
-        if path.startswith("/webrepl-stop"):
-            if ("token=" + SECRET_REPL_TOKEN) in path:
-                ok = stop_webrepl()
-                body = "WebREPL stopped\n" if ok else "WebREPL stop failed\n"
-            else:
-                body = "Missing or invalid token\n"
-            response = (
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: text/plain\r\n"
-                "Connection: close\r\n"
-                "\r\n"
-                + body
-            )
-            try:
-                client.send(response.encode())
-            except Exception:
-                pass
-            error_count = 0
+            request = client.recv(1024)
+        except OSError:
+            # Timeout reading request
+            if DEBUG:
+                print("Request timeout")
             continue
 
-        if path.startswith("/webrepl"):
-            # require token in query string, simple check
-            if ("token=" + SECRET_REPL_TOKEN) in path:
-                ok = start_webrepl()
-                body = "WebREPL started\n" if ok else "WebREPL failed\n"
-            else:
-                body = "Missing or invalid token\n"
-            response = (
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: text/plain\r\n"
-                "Connection: close\r\n"
-                "\r\n"
-                + body
-            )
-            try:
-                client.send(response.encode())
-            except Exception:
-                pass
-            error_count = 0
+        # Check for empty request
+        if not request:
+            if DEBUG:
+                print("Empty request")
             continue
 
-        # Read sensors
-        t, p, h, l = safe_read_sensors()
+        try:
+            request = request.decode()
+        except Exception as e:
+            if DEBUG:
+                print("Decode error:", e)
+            continue
 
-        if t is None:
-            body = "Sensor Read Error\n"
+        if DEBUG:
+            print("Request:", request[:50])
+
+        # Initialize sensors for this request
+        bme = None
+        bh = None
+        try:
+            i2c = I2C(scl=Pin(5), sda=Pin(4))
+            bme = BME280(i2c=i2c)
+            bh = BH1750(i2c)
+        except Exception as e:
+            if DEBUG:
+                print("Sensor init error:", e)
+
+        # Read sensors with timeout protection
+        t, p, h, l = None, None, None, None
+        
+        if bme is not None:
+            try:
+                start_sensor = time.time()
+                t, p, h = bme.read_compensated()
+                elapsed = time.time() - start_sensor
+                if DEBUG and elapsed > 1:
+                    print("BME280 slow read: {0:.2f}s".format(elapsed))
+            except Exception as e:
+                if DEBUG:
+                    print("BME280 error:", e)
+
+        if bh is not None:
+            try:
+                start_sensor = time.time()
+                l = bh.luminance()
+                elapsed = time.time() - start_sensor
+                if DEBUG and elapsed > 1:
+                    print("BH1750 slow read: {0:.2f}s".format(elapsed))
+            except Exception as e:
+                if DEBUG:
+                    print("BH1750 error:", e)
+
+        # Build response
+        if t is not None and p is not None and h is not None and l is not None:
+            data = {
+                "temperature_c": t,
+                "pressure_pa": p,
+                "humidity_pct": h,
+                "lux": l,
+                "uptime_seconds": int(time.time()),
+                "memory_free_bytes": gc.mem_free(),
+                "memory_allocated_bytes": gc.mem_alloc()
+            }
+            body = json.dumps(data)
+            http_status = "HTTP/1.1 200 OK"
         else:
-            try:
-                body = (
-                    "Temp: {0:.2f} C\n".format(t)
-                    + "Pressure: {0:.2f} Pa\n".format(p)
-                    + "Humidity: {0:.2f} %\n".format(h)
-                    + "Lux: {0}\n".format(l)
-                )
-            except Exception:
-                body = "Sensor Read Error\n"
+            data = {
+                "error": "Sensor read error",
+                "uptime_seconds": int(time.time()),
+                "memory_free_bytes": gc.mem_free(),
+                "memory_allocated_bytes": gc.mem_alloc()
+            }
+            body = json.dumps(data)
+            http_status = "HTTP/1.1 503 Service Unavailable"
 
         response = (
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/plain\r\n"
-            "Connection: close\r\n"
-            "\r\n"
+            http_status + "\r\n"
+            + "Content-Type: application/json\r\n"
+            + "Connection: close\r\n"
+            + "Content-Length: {0}\r\n".format(len(body))
+            + "\r\n"
             + body
         )
 
         try:
             client.send(response.encode())
-        except Exception:
-            # some sockets/platforms need sendall
-            try:
-                client.sendall(response.encode())
-            except Exception as e:
-                print("Send failed:", e)
-
-        error_count = 0
+        except Exception as e:
+            if DEBUG:
+                print("Send error:", e)
 
     except Exception as e:
-        print("Error in loop at", time.time(), ":", e)
-        error_count += 1
-        # if socket seems bad, recreate it
-        if error_count > ERROR_REBOOT_THRESHOLD:
-            print("Too many errors, rebooting device")
-            try:
-                time.sleep(2)
-            except:
-                pass
-            try:
-                machine.reset()
-            except Exception as e:
-                print("Reset failed:", e)
-            error_count = 0
+        if DEBUG:
+            print("Unexpected error:", e)
 
     finally:
-        try:
-            if client:
+        if client:
+            try:
                 client.close()
-        except:
-            pass
-        gc.collect()
-        # feed watchdog to indicate liveness
-        feed_wdt()
-        time.sleep_ms(10)
+            except Exception:
+                pass
+        
+        # Collect garbage periodically to avoid GC pauses on every request
+        request_count += 1
+        if request_count >= GC_EVERY_N_REQUESTS:
+            gc.collect()
+            request_count = 0

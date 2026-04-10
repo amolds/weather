@@ -1,6 +1,7 @@
 import requests
-import re
+import json
 import pyodbc
+import time
 from datetime import datetime
 
 # URL of your local web server endpoint
@@ -17,23 +18,6 @@ CONN_STR = (
     "TrustServerCertificate=yes;"
 )
 
-def parse_sensor_data(text):
-    data = {}
-
-    patterns = {
-        "temperature": r"Temp:\s*([0-9.]+)\s*C",
-        "pressure": r"Pressure:\s*([0-9.]+)\s*Pa",
-        "humidity": r"Humidity:\s*([0-9.]+)\s*%",
-        "lux": r"Lux:\s*([0-9.]+)"
-    }
-
-    for key, pattern in patterns.items():
-        match = re.search(pattern, text)
-        if match:
-            data[key] = float(match.group(1))
-
-    return data
-
 
 def insert_into_sql(data):
     conn = pyodbc.connect(CONN_STR)
@@ -46,9 +30,9 @@ def insert_into_sql(data):
 
     cursor.execute(
         query,
-        data.get("temperature"),
-        data.get("pressure"),
-        data.get("humidity"),
+        data.get("temperature_c"),
+        data.get("pressure_pa"),
+        data.get("humidity_pct"),
         data.get("lux"),
         datetime.now()
     )
@@ -59,20 +43,59 @@ def insert_into_sql(data):
 
 
 def fetch_and_store():
-    # Fetch raw text from the server
-    response = requests.get(URL)
-    response.raise_for_status()
+    MAX_ATTEMPTS = 10
+    RETRY_DELAY = 30  # seconds between attempts
+    
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            # Fetch JSON from the server
+            response = requests.get(URL, timeout=10)  # 10 second timeout
+            response.raise_for_status()
 
-    raw_text = response.text
-    print("Raw response:\n", raw_text)
+            # Parse JSON response
+            data = response.json()
+            print("Attempt {0}/{1} - Raw response: {2}".format(attempt, MAX_ATTEMPTS, json.dumps(data, indent=2)))
 
-    # Parse the sensor values
-    parsed = parse_sensor_data(raw_text)
-    print("\nParsed values:", parsed)
+            # Check for errors
+            if "error" in data:
+                print("Attempt {0}/{1} - Error from sensor: {2}".format(attempt, MAX_ATTEMPTS, data["error"]))
+                if attempt < MAX_ATTEMPTS:
+                    print("Retrying in {0} seconds...".format(RETRY_DELAY))
+                    time.sleep(RETRY_DELAY)
+                    continue
+                else:
+                    print("All attempts failed. Giving up.")
+                    return
 
-    # Store in SQL Server
-    insert_into_sql(parsed)
-    print("\nData successfully stored in SQL Server.")
+            print("Attempt {0}/{1} - Success!".format(attempt, MAX_ATTEMPTS))
+            print("\nSensor values:")
+            print("  Temperature: {0:.2f} C".format(data.get("temperature_c")))
+            print("  Pressure: {0:.2f} Pa".format(data.get("pressure_pa")))
+            print("  Humidity: {0:.2f} %".format(data.get("humidity_pct")))
+            print("  Lux: {0}".format(data.get("lux")))
+            print("\nDevice status:")
+            print("  Uptime: {0} seconds".format(data.get("uptime_seconds")))
+            print("  Memory free: {0} bytes".format(data.get("memory_free_bytes")))
+            print("  Memory allocated: {0} bytes".format(data.get("memory_allocated_bytes")))
+
+            # Store in SQL Server
+            insert_into_sql(data)
+            print("\nData successfully stored in SQL Server.")
+            return  # Success - exit function
+
+        except requests.exceptions.RequestException as e:
+            print("Attempt {0}/{1} - Connection error: {2}".format(attempt, MAX_ATTEMPTS, e))
+        except json.JSONDecodeError as e:
+            print("Attempt {0}/{1} - JSON parse error: {2}".format(attempt, MAX_ATTEMPTS, e))
+        except Exception as e:
+            print("Attempt {0}/{1} - Unexpected error: {2}".format(attempt, MAX_ATTEMPTS, e))
+        
+        # If we get here, the attempt failed
+        if attempt < MAX_ATTEMPTS:
+            print("Retrying in {0} seconds...".format(RETRY_DELAY))
+            time.sleep(RETRY_DELAY)
+        else:
+            print("All {0} attempts failed.".format(MAX_ATTEMPTS))
 
 
 if __name__ == "__main__":

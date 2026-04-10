@@ -190,6 +190,7 @@ class Handler(BaseHTTPRequestHandler):
             <html>
             <head>
                 <meta charset="UTF-8">
+                <meta http-equiv="refresh" content="300">
                 <title>Weather Dashboard</title>
                 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
                 <style>
@@ -430,7 +431,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(html.encode('utf-8'))
 
 if __name__ == '__main__':
-    server_address = ('0.0.0.0', 8080)
+    server_address = ('', 8000)
     httpd = HTTPServer(server_address, Handler)
-    print('Serving on port 8080...')
+    print('Serving on port 8000...')
     httpd.serve_forever()
