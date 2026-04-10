@@ -248,6 +248,44 @@ def lux_icon_and_label(lux):
     else:
         return "🌞", "Intense sun"
 
+def get_year_to_date_calendar():
+    """Get year-to-date daily low/high for temperature, humidity, and pressure"""
+    conn = pyodbc.connect(CONN_STR)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT
+            CAST(Timestamp AS date) AS Day,
+            MIN(Temperature) AS LowTemp,
+            MAX(Temperature) AS HighTemp,
+            MIN(Humidity) AS LowHumidity,
+            MAX(Humidity) AS HighHumidity,
+            MIN(Pressure) AS LowPressure,
+            MAX(Pressure) AS HighPressure
+        FROM SensorReadings
+        WHERE CAST(Timestamp AS date) >= DATEFROMPARTS(YEAR(GETDATE()), 1, 1)
+        GROUP BY CAST(Timestamp AS date)
+        ORDER BY Day ASC
+    """)
+
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    calendar_data = {}
+    for day, low_temp_c, high_temp_c, low_humidity, high_humidity, low_pressure, high_pressure in rows:
+        day_str = day.strftime("%Y-%m-%d")
+        calendar_data[day_str] = {
+            "temp_low": c_to_f(float(low_temp_c)),
+            "temp_high": c_to_f(float(high_temp_c)),
+            "humidity_low": float(low_humidity),
+            "humidity_high": float(high_humidity),
+            "pressure_low": float(low_pressure),
+            "pressure_high": float(high_pressure)
+        }
+
+    return calendar_data
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         reading = get_latest_reading()
@@ -264,6 +302,8 @@ class Handler(BaseHTTPRequestHandler):
             dawn_time = get_dawn_time()
             dusk_time = get_dusk_time()
             daily_labels, temp_lows_f, temp_highs_f, humidity_lows, humidity_highs, pressure_lows, pressure_highs = get_daily_high_low()
+            calendar_data = get_year_to_date_calendar()
+            calendar_data_json = json.dumps(calendar_data)
 
             # Calculate min/max for 24-hour charts
             if last24_temps_f:
@@ -428,19 +468,61 @@ class Handler(BaseHTTPRequestHandler):
                         justify-content: flex-end;
                         padding: 15px 20px;
                         box-sizing: border-box;
+                        position: relative;
                     }}
                     .toggle-btn {{
-                        padding: 8px 16px;
-                        border-radius: 20px;
+                        position: fixed;
+                        top: 20px;
+                        right: 20px;
+                        width: 50px;
+                        height: 50px;
+                        border-radius: 50%;
                         border: none;
                         cursor: pointer;
-                        font-size: 14px;
-                        background: rgba(255,255,255,0.8);
-                        transition: background 0.3s;
+                        font-size: 20px;
+                        background: rgba(255,255,255,0.9);
+                        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+                        transition: all 0.3s ease;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        z-index: 1000;
+                    }}
+                    .toggle-btn:hover {{
+                        transform: scale(1.1);
+                        box-shadow: 0 6px 20px rgba(0,0,0,0.25);
+                    }}
+                    .sticky-temp {{
+                        position: fixed;
+                        top: 14px;
+                        left: 50%;
+                        transform: translateX(-50%);
+                        background: rgba(255,255,255,0.92);
+                        color: #333;
+                        border-radius: 999px;
+                        padding: 10px 18px;
+                        font-weight: bold;
+                        box-shadow: 0 4px 14px rgba(0,0,0,0.18);
+                        z-index: 900;
+                        display: none;
+                    }}
+                    .sticky-temp.show {{
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
                     }}
                     body.dark .toggle-btn {{
-                        background: rgba(50,50,50,0.8);
+                        background: rgba(50,50,50,0.9);
                         color: #e0e0e0;
+                        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                    }}
+                    body.dark .sticky-temp {{
+                        background: rgba(50,50,50,0.92);
+                        color: #e0e0e0;
+                        box-shadow: 0 4px 14px rgba(0,0,0,0.45);
+                    }}
+                    body.dark .toggle-btn:hover {{
+                        box-shadow: 0 6px 20px rgba(0,0,0,0.5);
                     }}
                     .content {{
                         width: 100%;
@@ -518,12 +600,55 @@ class Handler(BaseHTTPRequestHandler):
                         width: 100% !important;
                         height: 300px !important;
                     }}
+                    .calendar-grid {{
+                        display: grid;
+                        grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+                        gap: 8px;
+                        margin-bottom: 15px;
+                    }}
+                    .calendar-day {{
+                        background: rgba(100,100,100,0.1);
+                        border: 1px solid rgba(100,100,100,0.2);
+                        border-radius: 6px;
+                        padding: 8px;
+                        font-size: 12px;
+                        text-align: center;
+                        transition: all 0.2s;
+                        cursor: default;
+                    }}
+                    .calendar-day:hover {{
+                        background: rgba(100,100,100,0.2);
+                        border-color: rgba(100,100,100,0.4);
+                        transform: scale(1.02);
+                    }}
+                    body.dark .calendar-day {{
+                        background: rgba(200,200,200,0.1);
+                        border-color: rgba(200,200,200,0.2);
+                    }}
+                    body.dark .calendar-day:hover {{
+                        background: rgba(200,200,200,0.2);
+                        border-color: rgba(200,200,200,0.4);
+                    }}
+                    .calendar-day-date {{
+                        font-weight: bold;
+                        margin-bottom: 4px;
+                        font-size: 11px;
+                    }}
+                    .calendar-day-low {{
+                        color: #4a90e2;
+                        font-size: 11px;
+                    }}
+                    .calendar-day-high {{
+                        color: #d0021b;
+                        font-size: 11px;
+                    }}
                 </style>
             </head>
             <body>
                 <div class="top-bar">
-                    <button class="toggle-btn" onclick="toggleMode()">Toggle Mode</button>
+                    <button class="toggle-btn" onclick="toggleMode()" title="Toggle Dark/Light Mode">🌓</button>
                 </div>
+                <div id="stickyTemp" class="sticky-temp">Current Temperature: {temp_f:.1f} °F</div>
 
                 <div class="content">
                     <div class="card latest-card">
@@ -587,6 +712,22 @@ class Handler(BaseHTTPRequestHandler):
                         {weekly_canvases_html}
                         {humidity_weekly_canvases_html}
                         {pressure_weekly_canvases_html}
+
+                        <!-- Year-to-Date Calendar -->
+                        <div class="card">
+                            <h2>Year-to-Date Calendar (Temperature °F)</h2>
+                            <div id="tempCalendar" class="calendar-grid"></div>
+                        </div>
+
+                        <div class="card">
+                            <h2>Year-to-Date Calendar (Humidity %)</h2>
+                            <div id="humidityCalendar" class="calendar-grid"></div>
+                        </div>
+
+                        <div class="card">
+                            <h2>Year-to-Date Calendar (Pressure Pa)</h2>
+                            <div id="pressureCalendar" class="calendar-grid"></div>
+                        </div>
                     </div>
                 </div>
 
@@ -602,6 +743,35 @@ class Handler(BaseHTTPRequestHandler):
                     const saved = localStorage.getItem("mode") || "dark";
                     applyMode(saved);
 
+                    let autoScrollTimer = null;
+
+                    function startAutoScroll() {{
+                        const stickyTempEl = document.getElementById('stickyTemp');
+                        if (stickyTempEl) {{
+                            stickyTempEl.classList.add('show');
+                        }}
+
+                        if (autoScrollTimer) {{
+                            return;
+                        }}
+
+                        const scrollStepPx = 1;
+                        const intervalMs = 50;
+
+                        autoScrollTimer = setInterval(() => {{
+                            const atBottom = (window.innerHeight + window.scrollY) >= (document.body.scrollHeight - 2);
+                            if (atBottom) {{
+                                window.scrollTo(0, 0);
+                            }} else {{
+                                window.scrollBy(0, scrollStepPx);
+                            }}
+                        }}, intervalMs);
+                    }}
+
+                    window.addEventListener('load', () => {{
+                        setTimeout(startAutoScroll, 10000);
+                    }});
+
                     const last24Labels = {last24_labels_json};
                     const last24Temps = {last24_temps_json};
                     const last24Humidity = {last24_humidity_json};
@@ -609,6 +779,37 @@ class Handler(BaseHTTPRequestHandler):
                     const weeklyData = {weekly_data_json};
                     const humidityWeeklyData = {humidity_weekly_data_json};
                     const pressureWeeklyData = {pressure_weekly_data_json};
+                    const calendarData = {calendar_data_json};
+
+                    // Function to render calendar
+                    function renderCalendar(containerId, dataKey) {{
+                        const container = document.getElementById(containerId);
+                        container.innerHTML = '';
+                        
+                        for (const [dateStr, dayData] of Object.entries(calendarData).sort()) {{
+                            const dayDiv = document.createElement('div');
+                            dayDiv.className = 'calendar-day';
+                            
+                            const dateParts = dateStr.split('-');
+                            const monthDay = `${{dateParts[1]}}/${{dateParts[2]}}`;
+                            
+                            let lowValue = dayData[dataKey + '_low'];
+                            let highValue = dayData[dataKey + '_high'];
+                            
+                            dayDiv.innerHTML = `
+                                <div class="calendar-day-date">${{monthDay}}</div>
+                                <div class="calendar-day-low">L: ${{lowValue.toFixed(1)}}</div>
+                                <div class="calendar-day-high">H: ${{highValue.toFixed(1)}}</div>
+                            `;
+                            
+                            container.appendChild(dayDiv);
+                        }}
+                    }}
+
+                    // Render the three calendars
+                    renderCalendar('tempCalendar', 'temp');
+                    renderCalendar('humidityCalendar', 'humidity');
+                    renderCalendar('pressureCalendar', 'pressure');
 
                     const last24Ctx = document.getElementById('last24Chart').getContext('2d');
 
