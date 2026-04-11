@@ -117,67 +117,89 @@ def get_last_24h_pressure():
 
     return labels, pressure_values
 
-def get_dawn_time():
-    """Get today's dawn time (lux rising above 10), or yesterday's if today hasn't occurred yet"""
+def get_recent_lux_readings(days=2):
     conn = pyodbc.connect(CONN_STR)
     cursor = conn.cursor()
 
-    # Get lux readings from today and yesterday, ordered by time
     cursor.execute("""
         SELECT Timestamp, Lux
         FROM SensorReadings
-        WHERE Timestamp >= DATEADD(day, -1, GETDATE())
+        WHERE Timestamp >= DATEADD(day, -?, GETDATE())
         ORDER BY Timestamp ASC
-    """)
+    """, (days,))
 
-    rows = cursor.fetchall()
+    rows = [(ts, float(lux)) for ts, lux in cursor.fetchall()]
     cursor.close()
     conn.close()
 
-    # Find the most recent time when lux crossed above 10 (dawn)
-    previous_lux = None
-    for ts, lux in rows:
-        lux_val = float(lux)
-        if previous_lux is not None and previous_lux <= 10 and lux_val > 10:
-            return ts.strftime("%H:%M")
-        previous_lux = lux_val
+    return rows
 
-    return "N/A"
+def find_sustained_transition(rows, start_hour, from_above, threshold, sustain_count=2):
+    if not rows:
+        return None
+
+    last_transition_time = None
+
+    for index in range(1, len(rows)):
+        previous_ts, previous_lux = rows[index - 1]
+        current_ts, current_lux = rows[index]
+
+        if current_ts.hour < start_hour:
+            continue
+
+        if from_above:
+            crossed = previous_lux >= threshold and current_lux < threshold
+            sustained = all(next_lux < threshold for _, next_lux in rows[index:index + sustain_count])
+        else:
+            crossed = previous_lux <= threshold and current_lux > threshold
+            sustained = all(next_lux > threshold for _, next_lux in rows[index:index + sustain_count])
+
+        if crossed and sustained:
+            last_transition_time = current_ts.strftime("%H:%M")
+
+    return last_transition_time
+
+def find_daily_transition(rows, start_hour, from_above, threshold, sustain_count=2):
+    if not rows:
+        return None
+
+    for index in range(1, len(rows)):
+        previous_ts, previous_lux = rows[index - 1]
+        current_ts, current_lux = rows[index]
+
+        if current_ts.hour < start_hour:
+            continue
+
+        if from_above:
+            crossed = previous_lux >= threshold and current_lux < threshold
+            sustained = all(next_lux < threshold for _, next_lux in rows[index:index + sustain_count])
+        else:
+            crossed = previous_lux <= threshold and current_lux > threshold
+            sustained = all(next_lux > threshold for _, next_lux in rows[index:index + sustain_count])
+
+        if crossed and sustained:
+            return current_ts.strftime("%H:%M")
+
+    return None
+
+def get_dawn_time():
+    """Get the most recent sustained dawn time from recent lux history."""
+    rows = get_recent_lux_readings(days=2)
+    dawn_time = find_sustained_transition(rows, start_hour=4, from_above=False, threshold=10, sustain_count=2)
+    return dawn_time or "N/A"
 
 def get_dusk_time():
-    """Get today's dusk time (lux falling below 10), or 'Not yet' if it hasn't occurred"""
-    conn = pyodbc.connect(CONN_STR)
-    cursor = conn.cursor()
-
-    # Get today's date
-    cursor.execute("SELECT CAST(GETDATE() AS date)")
-    today = cursor.fetchone()[0]
-
-    # Get lux readings from today only, ordered by time
-    cursor.execute("""
-        SELECT Timestamp, Lux
-        FROM SensorReadings
-        WHERE CAST(Timestamp AS date) = ?
-        ORDER BY Timestamp ASC
-    """, (today,))
-
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
-
+    """Get the most recent sustained dusk time, or 'Not yet' while current lux is still above threshold."""
+    rows = get_recent_lux_readings(days=2)
     if not rows:
         return "N/A"
 
-    # Find if dusk has occurred today (lux falling below 10)
-    previous_lux = None
-    for ts, lux in rows:
-        lux_val = float(lux)
-        if previous_lux is not None and previous_lux >= 10 and lux_val < 10:
-            return ts.strftime("%H:%M")
-        previous_lux = lux_val
+    current_lux = rows[-1][1]
+    if current_lux >= 10:
+        return "Not yet"
 
-    # If we get here, dusk hasn't occurred yet today
-    return "Not yet"
+    dusk_time = find_sustained_transition(rows, start_hour=16, from_above=True, threshold=10, sustain_count=2)
+    return dusk_time or "N/A"
 
 def get_daily_high_low():
     conn = pyodbc.connect(CONN_STR)
@@ -249,7 +271,7 @@ def lux_icon_and_label(lux):
         return "🌞", "Intense sun"
 
 def get_year_to_date_calendar():
-    """Get year-to-date daily low/high for temperature, humidity, and pressure"""
+    """Get year-to-date daily dawn/dusk plus low/high for temperature, humidity, and pressure"""
     conn = pyodbc.connect(CONN_STR)
     cursor = conn.cursor()
 
@@ -269,20 +291,46 @@ def get_year_to_date_calendar():
     """)
 
     rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
 
     calendar_data = {}
     for day, low_temp_c, high_temp_c, low_humidity, high_humidity, low_pressure, high_pressure in rows:
         day_str = day.strftime("%Y-%m-%d")
         calendar_data[day_str] = {
+            "dawn": "N/A",
             "temp_low": c_to_f(float(low_temp_c)),
             "temp_high": c_to_f(float(high_temp_c)),
+            "dusk": "N/A",
             "humidity_low": float(low_humidity),
             "humidity_high": float(high_humidity),
             "pressure_low": float(low_pressure),
             "pressure_high": float(high_pressure)
         }
+
+    cursor.execute("""
+        SELECT CAST(Timestamp AS date) AS Day, Timestamp, Lux
+        FROM SensorReadings
+        WHERE CAST(Timestamp AS date) >= DATEFROMPARTS(YEAR(GETDATE()), 1, 1)
+        ORDER BY Timestamp ASC
+    """)
+
+    lux_rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    daily_lux = {}
+    for day, ts, lux in lux_rows:
+        day_str = day.strftime("%Y-%m-%d")
+        daily_lux.setdefault(day_str, []).append((ts, float(lux)))
+
+    for day_str, day_rows in daily_lux.items():
+        if day_str not in calendar_data:
+            continue
+
+        dawn_time = find_daily_transition(day_rows, start_hour=4, from_above=False, threshold=10, sustain_count=2)
+        dusk_time = find_daily_transition(day_rows, start_hour=16, from_above=True, threshold=10, sustain_count=2)
+
+        calendar_data[day_str]["dawn"] = dawn_time or "N/A"
+        calendar_data[day_str]["dusk"] = dusk_time or "N/A"
 
     return calendar_data
 
@@ -500,8 +548,10 @@ class Handler(BaseHTTPRequestHandler):
                         background: rgba(255,255,255,0.92);
                         color: #333;
                         border-radius: 999px;
-                        padding: 10px 18px;
+                        padding: 14px 24px;
                         font-weight: bold;
+                        font-size: 24px;
+                        line-height: 1;
                         box-shadow: 0 4px 14px rgba(0,0,0,0.18);
                         z-index: 900;
                         display: none;
@@ -602,7 +652,7 @@ class Handler(BaseHTTPRequestHandler):
                     }}
                     .calendar-grid {{
                         display: grid;
-                        grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+                        grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
                         gap: 8px;
                         margin-bottom: 15px;
                     }}
@@ -612,7 +662,7 @@ class Handler(BaseHTTPRequestHandler):
                         border-radius: 6px;
                         padding: 8px;
                         font-size: 12px;
-                        text-align: center;
+                        text-align: left;
                         transition: all 0.2s;
                         cursor: default;
                     }}
@@ -633,6 +683,27 @@ class Handler(BaseHTTPRequestHandler):
                         font-weight: bold;
                         margin-bottom: 4px;
                         font-size: 11px;
+                        text-align: center;
+                    }}
+                    .calendar-day-dawn,
+                    .calendar-day-dusk {{
+                        font-size: 10px;
+                        opacity: 0.85;
+                        text-align: center;
+                    }}
+                    .calendar-measurement {{
+                        margin-top: 6px;
+                        padding-top: 6px;
+                        border-top: 1px solid rgba(100,100,100,0.15);
+                    }}
+                    body.dark .calendar-measurement {{
+                        border-top-color: rgba(200,200,200,0.15);
+                    }}
+                    .calendar-measurement-label {{
+                        font-size: 10px;
+                        font-weight: bold;
+                        opacity: 0.9;
+                        margin-bottom: 2px;
                     }}
                     .calendar-day-low {{
                         color: #4a90e2;
@@ -715,18 +786,8 @@ class Handler(BaseHTTPRequestHandler):
 
                         <!-- Year-to-Date Calendar -->
                         <div class="card">
-                            <h2>Year-to-Date Calendar (Temperature °F)</h2>
-                            <div id="tempCalendar" class="calendar-grid"></div>
-                        </div>
-
-                        <div class="card">
-                            <h2>Year-to-Date Calendar (Humidity %)</h2>
-                            <div id="humidityCalendar" class="calendar-grid"></div>
-                        </div>
-
-                        <div class="card">
-                            <h2>Year-to-Date Calendar (Pressure Pa)</h2>
-                            <div id="pressureCalendar" class="calendar-grid"></div>
+                            <h2>Year-to-Date Calendar</h2>
+                            <div id="ytdCalendar" class="calendar-grid"></div>
                         </div>
                     </div>
                 </div>
@@ -744,6 +805,8 @@ class Handler(BaseHTTPRequestHandler):
                     applyMode(saved);
 
                     let autoScrollTimer = null;
+                    let autoScrollResumeAt = 0;
+                    let pendingScrollReset = false;
 
                     function startAutoScroll() {{
                         const stickyTempEl = document.getElementById('stickyTemp');
@@ -759,9 +822,25 @@ class Handler(BaseHTTPRequestHandler):
                         const intervalMs = 50;
 
                         autoScrollTimer = setInterval(() => {{
+                            if (pendingScrollReset) {{
+                                if (Date.now() < autoScrollResumeAt) {{
+                                    return;
+                                }}
+
+                                window.scrollTo(0, 0);
+                                pendingScrollReset = false;
+                                autoScrollResumeAt = 0;
+                                return;
+                            }}
+
+                            if (Date.now() < autoScrollResumeAt) {{
+                                return;
+                            }}
+
                             const atBottom = (window.innerHeight + window.scrollY) >= (document.body.scrollHeight - 2);
                             if (atBottom) {{
-                                window.scrollTo(0, 0);
+                                pendingScrollReset = true;
+                                autoScrollResumeAt = Date.now() + 10000;
                             }} else {{
                                 window.scrollBy(0, scrollStepPx);
                             }}
@@ -781,8 +860,8 @@ class Handler(BaseHTTPRequestHandler):
                     const pressureWeeklyData = {pressure_weekly_data_json};
                     const calendarData = {calendar_data_json};
 
-                    // Function to render calendar
-                    function renderCalendar(containerId, dataKey) {{
+                    // Function to render the combined year-to-date calendar
+                    function renderCalendar(containerId) {{
                         const container = document.getElementById(containerId);
                         container.innerHTML = '';
                         
@@ -792,24 +871,36 @@ class Handler(BaseHTTPRequestHandler):
                             
                             const dateParts = dateStr.split('-');
                             const monthDay = `${{dateParts[1]}}/${{dateParts[2]}}`;
-                            
-                            let lowValue = dayData[dataKey + '_low'];
-                            let highValue = dayData[dataKey + '_high'];
+                            let dawnValue = dayData.dawn || 'N/A';
+                            let duskValue = dayData.dusk || 'N/A';
                             
                             dayDiv.innerHTML = `
                                 <div class="calendar-day-date">${{monthDay}}</div>
-                                <div class="calendar-day-low">L: ${{lowValue.toFixed(1)}}</div>
-                                <div class="calendar-day-high">H: ${{highValue.toFixed(1)}}</div>
+                                <div class="calendar-day-dawn">Dawn: ${{dawnValue}}</div>
+                                <div class="calendar-measurement">
+                                    <div class="calendar-measurement-label">Temperature (°F)</div>
+                                    <div class="calendar-day-low">L: ${{dayData.temp_low.toFixed(1)}}</div>
+                                    <div class="calendar-day-high">H: ${{dayData.temp_high.toFixed(1)}}</div>
+                                </div>
+                                <div class="calendar-measurement">
+                                    <div class="calendar-measurement-label">Humidity (%)</div>
+                                    <div class="calendar-day-low">L: ${{dayData.humidity_low.toFixed(1)}}</div>
+                                    <div class="calendar-day-high">H: ${{dayData.humidity_high.toFixed(1)}}</div>
+                                </div>
+                                <div class="calendar-measurement">
+                                    <div class="calendar-measurement-label">Pressure (Pa)</div>
+                                    <div class="calendar-day-low">L: ${{dayData.pressure_low.toFixed(1)}}</div>
+                                    <div class="calendar-day-high">H: ${{dayData.pressure_high.toFixed(1)}}</div>
+                                </div>
+                                <div class="calendar-day-dusk">Dusk: ${{duskValue}}</div>
                             `;
                             
                             container.appendChild(dayDiv);
                         }}
                     }}
 
-                    // Render the three calendars
-                    renderCalendar('tempCalendar', 'temp');
-                    renderCalendar('humidityCalendar', 'humidity');
-                    renderCalendar('pressureCalendar', 'pressure');
+                    // Render the combined calendar
+                    renderCalendar('ytdCalendar');
 
                     const last24Ctx = document.getElementById('last24Chart').getContext('2d');
 
@@ -947,7 +1038,7 @@ class Handler(BaseHTTPRequestHandler):
                                 plugins: {{ legend: {{ display: true }} }},
                                 scales: {{
                                     x: {{ title: {{ display: true, text: 'Day' }} }},
-                                    y: {{ title: {{ display: true, text: 'Value' }} }}
+                                    y: {{ title: {{ display: true, text: 'Temperature (°F)' }} }}
                                 }}
                             }}
                         }});
