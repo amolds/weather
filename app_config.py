@@ -6,9 +6,11 @@ WATCHDOG_TIMEOUT_MS = 30000
 try:
 	from local_settings import WIFI_PASSWORD
 	from local_settings import WIFI_SSID
+	from local_settings import WIFI_HOSTNAME
 except ImportError:
 	WIFI_SSID = "<fallback_ssid>"
 	WIFI_PASSWORD = "<fallback_ssid_pwd>"
+	WIFI_HOSTNAME = "weather-sensor"
 
 WIFI_RECONNECT_DELAY = 30
 WIFI_MAX_RECONNECT_ATTEMPTS = 3

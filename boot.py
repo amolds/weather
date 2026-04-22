@@ -16,6 +16,7 @@ from app_config import SERVER_HOST
 from app_config import SERVER_PORT
 from app_config import WATCHDOG_TIMEOUT_MS
 from app_config import WIFI_CONNECT_TIMEOUT_S
+from app_config import WIFI_HOSTNAME
 from app_config import WIFI_MAX_RECONNECT_ATTEMPTS
 from app_config import WIFI_PASSWORD
 from app_config import WIFI_RECONNECT_DELAY
@@ -44,6 +45,7 @@ def build_wifi_manager():
     return WifiManager(
         ssid=WIFI_SSID,
         password=WIFI_PASSWORD,
+        hostname=WIFI_HOSTNAME,
         reconnect_delay=WIFI_RECONNECT_DELAY,
         max_reconnect_attempts=WIFI_MAX_RECONNECT_ATTEMPTS,
         connect_timeout_s=WIFI_CONNECT_TIMEOUT_S,

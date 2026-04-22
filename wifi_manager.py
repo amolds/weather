@@ -7,6 +7,7 @@ class WifiManager:
         self,
         ssid,
         password,
+        hostname,
         reconnect_delay,
         max_reconnect_attempts,
         connect_timeout_s,
@@ -15,6 +16,7 @@ class WifiManager:
     ):
         self.ssid = ssid
         self.password = password
+        self.hostname = hostname
         self.reconnect_delay = reconnect_delay
         self.max_reconnect_attempts = max_reconnect_attempts
         self.connect_timeout_s = connect_timeout_s
@@ -26,7 +28,25 @@ class WifiManager:
     def _new_interface(self):
         wifi = network.WLAN(network.STA_IF)
         wifi.active(True)
+        self._apply_hostname(wifi)
         return wifi
+
+    def _apply_hostname(self, wifi):
+        if not self.hostname:
+            return
+
+        for key in ("dhcp_hostname", "hostname"):
+            try:
+                wifi.config(**{key: self.hostname})
+                return
+            except Exception:
+                pass
+
+        try:
+            network.hostname(self.hostname)
+        except Exception:
+            if self.debug:
+                print("Hostname configuration unsupported on this firmware")
 
     def connect(self):
         wifi = self._new_interface()
