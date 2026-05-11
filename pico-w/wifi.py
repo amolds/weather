@@ -2,9 +2,12 @@ import network
 import time
 
 
-def connect(ssid, password, timeout=20):
+def connect(ssid, password, hostname=None, timeout=20):
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
+
+    if hostname:
+        wlan.config(dhcp_hostname=hostname)
 
     if wlan.isconnected():
         return wlan

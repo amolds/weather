@@ -4,7 +4,7 @@ SD card CSV logger.
 Usage:
     from storage.sdlogger import SDLogger
     logger = SDLogger()
-    logger.log(timestamp, temp_c, temp_f, humidity, pressure, lux)
+    logger.log(timestamp, temp_c, temp_f, humidity, pressure, lux, gps_data=None)
     logger.close()
 
 The logger mounts the SD card on first use, writes a header row if the
@@ -17,7 +17,7 @@ import uos
 import config
 
 
-_HEADER = "timestamp,temp_c,temp_f,humidity,pressure_hpa,lux\n"
+_HEADER = "site_name,timestamp,temp_c,temp_f,humidity,pressure_hpa,lux,latitude,longitude,gps_time,gps_date\n"
 
 
 class SDLogger:
@@ -47,7 +47,7 @@ class SDLogger:
             uos.umount(config.SD_MOUNT)
             self._mounted = False
 
-    def log(self, timestamp, temp_c, temp_f, humidity, pressure, lux):
+    def log(self, timestamp, temp_c, temp_f, humidity, pressure, lux, gps_data=None):
         """Append one row to the CSV file on the SD card."""
         if self._led:
             self._led.on()
@@ -64,8 +64,19 @@ class SDLogger:
             with open(path, 'a') as f:
                 if new_file:
                     f.write(_HEADER)
-                row = "{},{:.2f},{:.2f},{:.1f},{:.2f},{:.1f}\n".format(
-                    timestamp, temp_c, temp_f, humidity, pressure, lux
+                lat = ""
+                lng = ""
+                gps_time = ""
+                gps_date = ""
+                if gps_data:
+                    lat = gps_data.get("latitude", "")
+                    lng = gps_data.get("longitude", "")
+                    gps_time = gps_data.get("time", "")
+                    gps_date = gps_data.get("date", "")
+
+                row = "{},{},{:.2f},{:.2f},{:.1f},{:.2f},{:.1f},{},{},{},{}\n".format(
+                    config.HOSTNAME, timestamp, temp_c, temp_f, humidity, pressure, lux,
+                    lat, lng, gps_time, gps_date
                 )
                 f.write(row)
             self._unmount()

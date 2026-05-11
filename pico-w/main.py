@@ -19,7 +19,15 @@ import wifi
 from sensors.sht31 import SHT31
 from sensors.tsl2591 import TSL2591
 from sensors.bmp390 import BMP390
-from storage.sdlogger import SDLogger
+from sensors.gps import GPS
+
+try:
+    from storage.sdlogger import SDLogger
+    _has_sdlogger = True
+except ImportError:
+    _has_sdlogger = False
+    print("Warning: SDLogger not available (sdcard module missing)")
+
 from server.http import serve
 
 # Shared state between cores — protected by a lock
@@ -41,7 +49,7 @@ def main():
     # --- Wi-Fi + NTP ---
     wlan = None
     try:
-        wlan = wifi.connect(config.WIFI_SSID, config.WIFI_PASSWORD)
+        wlan = wifi.connect(config.WIFI_SSID, config.WIFI_PASSWORD, config.HOSTNAME)
         wifi.sync_time()
     except Exception as e:
         print("Wi-Fi/NTP error (continuing without time sync):", e)
@@ -66,7 +74,26 @@ def main():
     sht31  = SHT31(i2c)
     tsl    = TSL2591(i2c)
     bmp    = BMP390(i2c)
-    logger = SDLogger(led=led_sd)
+    logger = None
+    if _has_sdlogger:
+        try:
+            logger = SDLogger(led=led_sd)
+        except Exception as e:
+            print("SDLogger init failed:", e)
+
+    # --- GPS init (optional) ---
+    gps = None
+    if config.ENABLE_GPS:
+        try:
+            gps = GPS(
+                uart_id=config.GPS_UART,
+                tx_pin=config.GPS_TX,
+                rx_pin=config.GPS_RX,
+                baudrate=config.GPS_BAUD,
+            )
+            print("GPS initialized on UART{}".format(config.GPS_UART))
+        except Exception as e:
+            print("GPS init failed:", e)
 
     print("Weather station running — logging every {}s".format(LOG_INTERVAL_S))
 
@@ -83,6 +110,14 @@ def main():
             pressure = bmp_data["pressure"]
             lux      = tsl_data["lux"]
 
+            gps_data = None
+            if gps:
+                try:
+                    gps.update(max_sentences=20)
+                    gps_data = gps.get_position()
+                except Exception as e:
+                    print("GPS read error:", e)
+
             # Update shared state for the HTTP server
             state_lock.acquire()
             try:
@@ -93,11 +128,19 @@ def main():
                     humidity=humidity,
                     pressure=pressure,
                     lux=lux,
+                    lat=(gps_data["latitude"] if gps_data else None),
+                    lng=(gps_data["longitude"] if gps_data else None),
+                    gps_time=(gps_data["time"] if gps_data else None),
+                    gps_date=(gps_data["date"] if gps_data else None),
                 ))
             finally:
                 state_lock.release()
 
-            logger.log(ts, temp_c, temp_f, humidity, pressure, lux)
+            if logger:
+                try:
+                    logger.log(ts, temp_c, temp_f, humidity, pressure, lux, gps_data=gps_data)
+                except Exception as e:
+                    print("SD log error:", e)
 
             print("{} | {:.1f}°C {:.1f}°F | RH {:.1f}% | {:.2f} hPa | {:.1f} lux".format(
                 ts, temp_c, temp_f, humidity, pressure, lux

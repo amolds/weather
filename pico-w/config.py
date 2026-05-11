@@ -3,6 +3,7 @@
 # Wi-Fi
 WIFI_SSID     = "<your-ssid>"
 WIFI_PASSWORD = "<your-password>"
+HOSTNAME      = "<your-hostname>"  # optional, for DHCP hostname; e.g. "pico-weather"
 
 # I2C
 I2C_BUS = 0
@@ -24,6 +25,13 @@ SD_LOG_FILE = '/sd/weather.csv'
 
 # Logging
 LOG_INTERVAL_S = 900  # 15 minutes
+
+# GPS (GT-U7)
+ENABLE_GPS = True
+GPS_UART = 1
+GPS_TX = 4  # GP4
+GPS_RX = 5  # GP5
+GPS_BAUD = 9600
 
 # Status LEDs
 LED_HTTP_PIN = 14  # GP14 — Pin 19: on during HTTP client connection

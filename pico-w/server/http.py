@@ -11,6 +11,7 @@ Endpoints:
 """
 
 import socket
+import config
 
 
 _HTML_TEMPLATE = """\
@@ -40,16 +41,43 @@ def _make_json(state, lock):
     if not d:
         return '{"error":"no data yet"}'
 
+    lat = d.get("lat")
+    lng = d.get("lng")
+    gps_time = d.get("gps_time")
+    gps_date = d.get("gps_date")
+
+    lat_json = "null" if lat is None else "{:.6f}".format(lat)
+    lng_json = "null" if lng is None else "{:.6f}".format(lng)
+    gps_time_json = "null" if gps_time is None else '"{}"'.format(gps_time)
+    gps_date_json = "null" if gps_date is None else '"{}"'.format(gps_date)
+
     return (
         '{{'
+        '"site_name":"{site_name}",'
         '"timestamp":"{timestamp}",'
         '"temp_c":{temp_c:.2f},'
         '"temp_f":{temp_f:.2f},'
         '"humidity":{humidity:.1f},'
         '"pressure_hpa":{pressure:.2f},'
-        '"lux":{lux:.1f}'
+        '"lux":{lux:.1f},'
+        '"lat":{lat_json},'
+        '"lng":{lng_json},'
+        '"gps_time":{gps_time_json},'
+        '"gps_date":{gps_date_json}'
         '}}'
-    ).format(**d)
+    ).format(
+        site_name=config.HOSTNAME,
+        timestamp=d["timestamp"],
+        temp_c=d["temp_c"],
+        temp_f=d["temp_f"],
+        humidity=d["humidity"],
+        pressure=d["pressure"],
+        lux=d["lux"],
+        lat_json=lat_json,
+        lng_json=lng_json,
+        gps_time_json=gps_time_json,
+        gps_date_json=gps_date_json,
+    )
 
 
 def serve(state, lock, port=80, led=None):
