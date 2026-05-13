@@ -4,6 +4,11 @@
 WIFI_SSID     = "<your-ssid>"
 WIFI_PASSWORD = "<your-password>"
 HOSTNAME      = "<your-hostname>"  # optional, for DHCP hostname; e.g. "pico-weather"
+WIFI_CONNECT_TIMEOUT_S = 20
+WIFI_RETRY_DELAY_S = 5
+WIFI_CHECK_INTERVAL_S = 10
+WIFI_RESET_ON_PROLONGED_DISCONNECT = True
+WIFI_MAX_DISCONNECT_S = 180
 
 # I2C
 I2C_BUS = 0

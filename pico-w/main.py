@@ -36,6 +36,9 @@ state_lock = _thread.allocate_lock()
 
 # How often to take a reading — controlled via config.LOG_INTERVAL_S
 LOG_INTERVAL_S = config.LOG_INTERVAL_S
+WIFI_CHECK_INTERVAL_S = getattr(config, "WIFI_CHECK_INTERVAL_S", 10)
+WIFI_RESET_ON_PROLONGED_DISCONNECT = getattr(config, "WIFI_RESET_ON_PROLONGED_DISCONNECT", True)
+WIFI_MAX_DISCONNECT_S = getattr(config, "WIFI_MAX_DISCONNECT_S", 180)
 
 
 def timestamp():
@@ -48,9 +51,16 @@ def timestamp():
 def main():
     # --- Wi-Fi + NTP ---
     wlan = None
+    ntp_synced = False
     try:
-        wlan = wifi.connect(config.WIFI_SSID, config.WIFI_PASSWORD, config.HOSTNAME)
+        wlan = wifi.connect(
+            config.WIFI_SSID,
+            config.WIFI_PASSWORD,
+            config.HOSTNAME,
+            timeout=getattr(config, "WIFI_CONNECT_TIMEOUT_S", 20),
+        )
         wifi.sync_time()
+        ntp_synced = True
     except Exception as e:
         print("Wi-Fi/NTP error (continuing without time sync):", e)
 
@@ -61,8 +71,14 @@ def main():
     led_sd.off()
 
     # --- Start HTTP server on core 1 (only if Wi-Fi is up) ---
+    http_started = False
     if wlan and wlan.isconnected():
         _thread.start_new_thread(serve, (latest, state_lock, 80, led_http))
+        http_started = True
+
+    last_wifi_check = time.time()
+    wifi_connected_once = bool(wlan and wlan.isconnected())
+    wifi_lost_since = None
 
     # --- Sensor init ---
     i2c = machine.I2C(
@@ -149,7 +165,58 @@ def main():
         except Exception as e:
             print("Read/log error:", e)
 
-        time.sleep(LOG_INTERVAL_S)
+        sleep_remaining = LOG_INTERVAL_S
+        while sleep_remaining > 0:
+            time.sleep(1)
+            sleep_remaining -= 1
+
+            now = time.time()
+            if now - last_wifi_check < WIFI_CHECK_INTERVAL_S:
+                continue
+
+            last_wifi_check = now
+            try:
+                wlan = wifi.ensure_connected(
+                    wlan,
+                    config.WIFI_SSID,
+                    config.WIFI_PASSWORD,
+                    hostname=config.HOSTNAME,
+                    timeout=getattr(config, "WIFI_CONNECT_TIMEOUT_S", 20),
+                )
+
+                if wlan and wlan.isconnected() and not http_started:
+                    _thread.start_new_thread(serve, (latest, state_lock, 80, led_http))
+                    http_started = True
+
+                if wlan and wlan.isconnected():
+                    wifi_connected_once = True
+                    wifi_lost_since = None
+                else:
+                    if wifi_connected_once and wifi_lost_since is None:
+                        wifi_lost_since = now
+
+                    if (
+                        WIFI_RESET_ON_PROLONGED_DISCONNECT
+                        and wifi_connected_once
+                        and wifi_lost_since is not None
+                    ):
+                        disconnected_for = now - wifi_lost_since
+                        if disconnected_for >= WIFI_MAX_DISCONNECT_S:
+                            print(
+                                "Wi-Fi disconnected for {}s; resetting".format(
+                                    int(disconnected_for)
+                                )
+                            )
+                            machine.reset()
+
+                if wlan and wlan.isconnected() and not ntp_synced:
+                    try:
+                        wifi.sync_time()
+                        ntp_synced = True
+                    except Exception as e:
+                        print("NTP sync retry failed:", e)
+            except Exception as e:
+                print("Wi-Fi reconnect check failed:", e)
 
 
 main()

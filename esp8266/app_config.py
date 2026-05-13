@@ -10,7 +10,7 @@ try:
 except ImportError:
 	WIFI_SSID = "<fallback_ssid>"
 	WIFI_PASSWORD = "<fallback_ssid_pwd>"
-	WIFI_HOSTNAME = "weather-sensor"
+	WIFI_HOSTNAME = "picow"
 
 WIFI_RECONNECT_DELAY = 30
 WIFI_MAX_RECONNECT_ATTEMPTS = 3
