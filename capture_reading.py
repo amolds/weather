@@ -7,7 +7,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 from datetime import datetime
 
-SENSOR_HOSTNAME = os.getenv("SENSOR_HOSTNAME", "weather-sensor")
+# Default sensor hostname used when SENSOR_HOSTNAME is not set.
+SENSOR_HOSTNAME = os.getenv("SENSOR_HOSTNAME", "picow")
 SENSOR_PORT = int(os.getenv("SENSOR_PORT", "80"))
 SCAN_WORKERS = int(os.getenv("SENSOR_SCAN_WORKERS", "32"))
 SCAN_TIMEOUT_S = float(os.getenv("SENSOR_SCAN_TIMEOUT_S", "1.0"))
@@ -31,15 +32,28 @@ def build_base_url(host_or_ip, port):
 
 
 def appears_to_be_sensor_payload(data):
+    return normalize_sensor_payload(data) is not None
+
+
+def normalize_sensor_payload(data):
     if not isinstance(data, dict):
-        return False
+        return None
 
-    required_keys = ("temperature_c", "pressure_pa", "humidity_pct", "lux")
-    for key in required_keys:
-        if key not in data:
-            return False
+    # Existing schema from the current sensor endpoint.
+    primary_keys = ("temperature_c", "pressure_pa", "humidity_pct", "lux")
+    if all(key in data for key in primary_keys):
+        return data
 
-    return True
+    # picow schema uses shorter names and pressure in hPa.
+    picow_keys = ("temp_c", "pressure_hpa", "humidity", "lux")
+    if all(key in data for key in picow_keys):
+        normalized = dict(data)
+        normalized["temperature_c"] = data.get("temp_c")
+        normalized["pressure_pa"] = float(data.get("pressure_hpa")) * 100.0
+        normalized["humidity_pct"] = data.get("humidity")
+        return normalized
+
+    return None
 
 
 def get_local_ipv4():
@@ -65,7 +79,9 @@ def discover_sensor_url(hostname, port):
     candidates = [hostname, "{0}.local".format(hostname)]
     for candidate in candidates:
         try:
+            print("Trying hostname candidate '{0}'".format(candidate))
             ip = socket.gethostbyname(candidate)
+            print("Resolved '{0}' to {1}; probing sensor endpoint".format(candidate, ip))
             discovered = probe_sensor(ip, port, SCAN_TIMEOUT_S)
             if discovered:
                 print("Discovered sensor via hostname '{0}' at {1}".format(candidate, discovered))
@@ -132,8 +148,10 @@ def fetch_and_store():
         try:
             if sensor_url is None:
                 sensor_url = discover_sensor_url(SENSOR_HOSTNAME, SENSOR_PORT)
+                print("Attempt {0}/{1} - Using sensor URL: {2}".format(attempt, MAX_ATTEMPTS, sensor_url))
 
             # Fetch JSON from the server
+            print("Attempt {0}/{1} - Connecting to {2}".format(attempt, MAX_ATTEMPTS, sensor_url))
             response = requests.get(sensor_url, timeout=10)  # 10 second timeout
             response.raise_for_status()
 
@@ -151,6 +169,10 @@ def fetch_and_store():
                 else:
                     print("All attempts failed. Giving up.")
                     return
+
+            data = normalize_sensor_payload(data)
+            if data is None:
+                raise ValueError("Response did not match expected sensor payload format")
 
             print("Attempt {0}/{1} - Success!".format(attempt, MAX_ATTEMPTS))
             print("\nSensor values:")
