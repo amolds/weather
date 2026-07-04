@@ -6,4 +6,9 @@ CREATE TABLE SensorReadings (
     Lux FLOAT,
     Timestamp DATETIME
 );
+GO
+
+CREATE NONCLUSTERED INDEX IDX_SensorReadings_Timestamp ON [dbo].[SensorReadings] (Timestamp)
+INCLUDE (Id, Temperature, Pressure, Humidity, Lux);
+GO
 
